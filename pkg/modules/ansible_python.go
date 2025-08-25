@@ -25,34 +25,72 @@ func (i AnsiblePythonInput) ToCode() string {
 	// Convert Args map to Go code format
 	argsCode := "map[string]interface{}{"
 	for k, v := range i.Args {
-		switch val := v.(type) {
-		case string:
-			argsCode += fmt.Sprintf("%q:%q,", k, val)
-		case bool:
-			argsCode += fmt.Sprintf("%q:%t,", k, val)
-		case int, int32, int64:
-			argsCode += fmt.Sprintf("%q:%v,", k, val)
-		case float32, float64:
-			argsCode += fmt.Sprintf("%q:%v,", k, val)
-		case []interface{}:
-			// Handle slice values like ["hostname test-switch","interface Ethernet1","  no shutdown"]
-			sliceCode := "[]interface{}{"
-			for _, item := range val {
-				switch itemVal := item.(type) {
-				case string:
-					sliceCode += fmt.Sprintf("%q,", itemVal)
-				default:
-					sliceCode += fmt.Sprintf("%v,", itemVal)
-				}
-			}
-			sliceCode += "}"
-			argsCode += fmt.Sprintf("%q:%s,", k, sliceCode)
-		default:
-			argsCode += fmt.Sprintf("%q:interface{}(%v),", k, val)
-		}
+		argsCode += fmt.Sprintf("%q:", k) // Always quote keys
+		argsCode += formatValueForGoCode(v)
+		argsCode += ","
 	}
 	argsCode += "}"
 	return fmt.Sprintf("modules.AnsiblePythonInput{ModuleName: %q, Args: %s}", i.ModuleName, argsCode)
+}
+
+// formatValueForGoCode recursively formats any value type for Go code generation
+func formatValueForGoCode(v interface{}) string {
+	switch val := v.(type) {
+	case nil:
+		return "nil"
+	case string:
+		return fmt.Sprintf("%q", val)
+	case bool:
+		return fmt.Sprintf("%t", val)
+	case int, int8, int16, int32, int64:
+		return fmt.Sprintf("%d", val)
+	case uint, uint8, uint16, uint32, uint64:
+		return fmt.Sprintf("%d", val)
+	case float32, float64:
+		return fmt.Sprintf("%g", val)
+	case []interface{}:
+		// Handle slice values
+		result := "[]interface{}{"
+		for _, item := range val {
+			result += formatValueForGoCode(item)
+			result += ","
+		}
+		result += "}"
+		return result
+	case []string:
+		// Handle string slice specifically
+		result := "[]string{"
+		for _, item := range val {
+			result += fmt.Sprintf("%q,", item)
+		}
+		result += "}"
+		return result
+	case map[string]interface{}:
+		// Handle nested maps
+		result := "map[string]interface{}{"
+		for k, v := range val {
+			result += fmt.Sprintf("%q:", k)
+			result += formatValueForGoCode(v)
+			result += ","
+		}
+		result += "}"
+		return result
+	case map[interface{}]interface{}:
+		// Handle maps with interface{} keys (common from YAML parsing)
+		result := "map[string]interface{}{"
+		for k, v := range val {
+			// Convert key to string
+			keyStr := fmt.Sprintf("%v", k)
+			result += fmt.Sprintf("%q:", keyStr)
+			result += formatValueForGoCode(v)
+			result += ","
+		}
+		result += "}"
+		return result
+	default:
+		// For any other types, use %#v but wrap in interface{}()
+		return fmt.Sprintf("interface{}(%#v)", val)
+	}
 }
 
 func (i AnsiblePythonInput) GetVariableUsage() []string {

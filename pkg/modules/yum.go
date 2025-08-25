@@ -23,13 +23,15 @@ func (ym YumModule) OutputType() reflect.Type {
 
 // YumInput defines the parameters for the yum module.
 type YumInput struct {
-	Name        interface{} `yaml:"name"`         // Name of the package(s) (string or list of strings)
-	State       string      `yaml:"state"`        // present (default), absent, latest, installed, removed
-	UpdateCache bool        `yaml:"update_cache"` // Run yum update before action
-	Enablerepo  interface{} `yaml:"enablerepo"`   // List of repos to enable (string, comma-delimited string, or list)
-	Disablerepo interface{} `yaml:"disablerepo"`  // List of repos to disable (string, comma-delimited string, or list)
-	Exclude     interface{} `yaml:"exclude"`      // List of packages to exclude (string, comma-delimited string, or list)
-	UpdateOnly  bool        `yaml:"update_only"`  // Only update packages, don't install/remove
+	Name        interface{} `yaml:"name"`                 // Name of the package(s) (string or list of strings)
+	State       string      `yaml:"state"`                // present (default), absent, latest, installed, removed
+	UpdateCache bool        `yaml:"update_cache"`         // Run yum update before action
+	Enablerepo  interface{} `yaml:"enablerepo"`           // List of repos to enable (string, comma-delimited string, or list)
+	Disablerepo interface{} `yaml:"disablerepo"`          // List of repos to disable (string, comma-delimited string, or list)
+	Exclude     interface{} `yaml:"exclude"`              // List of packages to exclude (string, comma-delimited string, or list)
+	UpdateOnly  bool        `yaml:"update_only"`          // Only update packages, don't install/remove
+	Autoremove  bool        `yaml:"autoremove,omitempty"` // Automatically uninstall packages and their unused dependencies
+	Security    bool        `yaml:"security,omitempty"`   // Update all packages to their latest versions, but only if they address security vulnerabilities
 	// Internal storage for parsed package list
 	PkgNames []string
 	// Internal storage for parsed repo lists
@@ -124,7 +126,7 @@ func (i *YumInput) ToCode() string {
 		excludeCode = "nil"
 	}
 
-	return fmt.Sprintf("&modules.YumInput{Name: %s, State: %q, UpdateCache: %t, Enablerepo: %s, Disablerepo: %s, Exclude: %s, UpdateOnly: %t, PkgNames: %s}",
+	return fmt.Sprintf("&modules.YumInput{Name: %s, State: %q, UpdateCache: %t, Enablerepo: %s, Disablerepo: %s, Exclude: %s, UpdateOnly: %t, Autoremove: %t, Security: %t, PkgNames: %s}",
 		nameCode,
 		i.State,
 		i.UpdateCache,
@@ -132,6 +134,8 @@ func (i *YumInput) ToCode() string {
 		disablerepoCode,
 		excludeCode,
 		i.UpdateOnly,
+		i.Autoremove,
+		i.Security,
 		pkgNamesCode,
 	)
 }
@@ -169,9 +173,9 @@ func (i *YumInput) ProvidesVariables() []string {
 func (i *YumInput) parseAndValidatePackages() error {
 	i.PkgNames = []string{}
 	if i.Name == nil {
-		// Allowed if update_cache is true
-		if !i.UpdateCache {
-			return fmt.Errorf("yum module requires 'name' or 'update_cache=true'")
+		// Allowed if update_cache or autoremove is true
+		if !i.UpdateCache && !i.Autoremove {
+			return fmt.Errorf("yum module requires 'name', 'update_cache=true', or 'autoremove=true'")
 		}
 		return nil
 	}
@@ -182,15 +186,15 @@ func (i *YumInput) parseAndValidatePackages() error {
 		strList, err := pkg.JinjaStringToStringList(v)
 		if err == nil {
 			i.PkgNames = append(i.PkgNames, strList...)
-		} else if v == "" && !i.UpdateCache {
-			return fmt.Errorf("yum module requires non-empty 'name' or 'update_cache=true'")
+		} else if v == "" && !i.UpdateCache && !i.Autoremove {
+			return fmt.Errorf("yum module requires non-empty 'name', 'update_cache=true', or 'autoremove=true'")
 		}
 		if err != nil && v != "" {
 			i.PkgNames = append(i.PkgNames, v)
 		}
 	case []interface{}:
-		if len(v) == 0 && !i.UpdateCache {
-			return fmt.Errorf("yum module requires non-empty 'name' list or 'update_cache=true'")
+		if len(v) == 0 && !i.UpdateCache && !i.Autoremove {
+			return fmt.Errorf("yum module requires non-empty 'name' list, 'update_cache=true', or 'autoremove=true'")
 		}
 		for idx, item := range v {
 			if nameStr, ok := item.(string); ok {
@@ -203,8 +207,8 @@ func (i *YumInput) parseAndValidatePackages() error {
 			}
 		}
 	case []string:
-		if len(v) == 0 && !i.UpdateCache {
-			return fmt.Errorf("yum module requires non-empty 'name' list or 'update_cache=true'")
+		if len(v) == 0 && !i.UpdateCache && !i.Autoremove {
+			return fmt.Errorf("yum module requires non-empty 'name' list, 'update_cache=true', or 'autoremove=true'")
 		}
 		for idx, nameStr := range v {
 			if nameStr == "" {
@@ -216,9 +220,9 @@ func (i *YumInput) parseAndValidatePackages() error {
 		return fmt.Errorf("invalid type for 'name' parameter: expected string or list of strings, got %T", i.Name)
 	}
 
-	// Check if PkgNames is empty when update_cache is false
-	if len(i.PkgNames) == 0 && !i.UpdateCache {
-		return fmt.Errorf("yum module requires at least one package name or 'update_cache=true'")
+	// Check if PkgNames is empty when update_cache and autoremove are false
+	if len(i.PkgNames) == 0 && !i.UpdateCache && !i.Autoremove {
+		return fmt.Errorf("yum module requires at least one package name, 'update_cache=true', or 'autoremove=true'")
 	}
 
 	return nil
@@ -424,11 +428,15 @@ func (o YumOutput) AsFacts() map[string]interface{} {
 }
 
 // runYumCommand executes a yum command, handling sudo and common options.
-func runYumCommand(c *pkg.HostContext, runAsUser string, enablerepo, disablerepo, exclude []string, args ...string) (string, string, bool, error) {
+func runYumCommand(c *pkg.HostContext, runAsUser string, enablerepo, disablerepo, exclude []string, security bool, args ...string) (string, string, bool, error) {
 	baseCmd := []string{
 		"yum",
 		"-y", // Assume yes
 		"-q", // Quiet mode
+	}
+
+	if security {
+		baseCmd = append(baseCmd, "--security")
 	}
 
 	// Add repository options
@@ -517,17 +525,6 @@ func (m YumModule) Execute(params pkg.ConcreteModuleInputProvider, closure *pkg.
 	output := YumOutput{Packages: yumParams.PkgNames, UpdateCache: yumParams.UpdateCache}
 	var overallChanged bool
 
-	// Template package names
-	templatedPkgNames := []string{}
-	for _, name := range yumParams.PkgNames {
-		templatedName, err := pkg.TemplateString(name, closure)
-		if err != nil {
-			return nil, fmt.Errorf("failed to template package name '%s': %w", name, err)
-		}
-		templatedPkgNames = append(templatedPkgNames, templatedName)
-	}
-	output.Packages = templatedPkgNames
-
 	// Template repository names
 	templatedEnablerepo := []string{}
 	for _, repo := range yumParams.EnablerepoList {
@@ -557,17 +554,38 @@ func (m YumModule) Execute(params pkg.ConcreteModuleInputProvider, closure *pkg.
 		templatedExclude = append(templatedExclude, templatedPkgName)
 	}
 
+	if yumParams.Autoremove {
+		common.LogDebug("Autoremoving packages", map[string]interface{}{"host": closure.HostContext.Host.Name})
+		_, _, changed, err := runYumCommand(closure.HostContext, runAs, templatedEnablerepo, templatedDisablerepo, templatedExclude, false, "autoremove")
+		if err != nil {
+			return nil, fmt.Errorf("failed to autoremove packages: %w", err)
+		}
+		output.WasChanged = changed
+		output.State = "autoremoved"
+		return output, nil
+	}
+
 	if yumParams.UpdateCache {
 		common.LogDebug("Updating yum cache", map[string]interface{}{"host": closure.HostContext.Host.Name})
-		_, _, cacheChanged, err := runYumCommand(closure.HostContext, runAs, templatedEnablerepo, templatedDisablerepo, templatedExclude, "update")
+		_, _, cacheChanged, err := runYumCommand(closure.HostContext, runAs, templatedEnablerepo, templatedDisablerepo, templatedExclude, yumParams.Security, "update")
 		if err != nil {
 			return nil, fmt.Errorf("failed to update yum cache: %w", err)
 		}
 		overallChanged = overallChanged || cacheChanged
 	}
 
-	if len(templatedPkgNames) == 0 || yumParams.UpdateOnly {
-		// Only update_cache was requested
+	// Template package names
+	templatedPkgNames := []string{}
+	for _, name := range yumParams.PkgNames {
+		templatedName, err := pkg.TemplateString(name, closure)
+		if err != nil {
+			return nil, fmt.Errorf("failed to template package name '%s': %w", name, err)
+		}
+		templatedPkgNames = append(templatedPkgNames, templatedName)
+	}
+	output.Packages = templatedPkgNames
+
+	if len(templatedPkgNames) == 0 {
 		output.State = "cache_updated"
 		output.WasChanged = overallChanged
 		return output, nil
@@ -603,8 +621,15 @@ func (m YumModule) Execute(params pkg.ConcreteModuleInputProvider, closure *pkg.
 	// Execute yum commands if needed
 	if len(pkgsToInstall) > 0 {
 		common.LogDebug("Ensuring packages are present/latest", map[string]interface{}{"host": closure.HostContext.Host.Name, "packages": pkgsToInstall, "state": yumParams.State})
-		args := append([]string{"install"}, pkgsToInstall...)
-		_, _, changed, err := runYumCommand(closure.HostContext, runAs, templatedEnablerepo, templatedDisablerepo, templatedExclude, args...)
+		var command string
+		if len(pkgsToInstall) == 1 && pkgsToInstall[0] == "*" && yumParams.State == "latest" {
+			command = "update"
+			pkgsToInstall = []string{}
+		} else {
+			command = "install"
+		}
+		args := append([]string{command}, pkgsToInstall...)
+		_, _, changed, err := runYumCommand(closure.HostContext, runAs, templatedEnablerepo, templatedDisablerepo, templatedExclude, yumParams.Security, args...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to install/upgrade packages %v: %w", pkgsToInstall, err)
 		}
@@ -615,7 +640,7 @@ func (m YumModule) Execute(params pkg.ConcreteModuleInputProvider, closure *pkg.
 	if len(pkgsToRemove) > 0 {
 		common.LogDebug("Ensuring packages are absent", map[string]interface{}{"host": closure.HostContext.Host.Name, "packages": pkgsToRemove})
 		args := append([]string{"remove"}, pkgsToRemove...)
-		_, _, changed, err := runYumCommand(closure.HostContext, runAs, templatedEnablerepo, templatedDisablerepo, templatedExclude, args...)
+		_, _, changed, err := runYumCommand(closure.HostContext, runAs, templatedEnablerepo, templatedDisablerepo, templatedExclude, false, args...)
 		if err != nil {
 			return nil, fmt.Errorf("failed to remove packages %v: %w", pkgsToRemove, err)
 		}
@@ -721,7 +746,7 @@ func (m YumModule) Revert(params pkg.ConcreteModuleInputProvider, closure *pkg.C
 	}
 
 	args := append([]string{revertAction}, pkgsForRevertAction...)
-	_, _, changed, err := runYumCommand(closure.HostContext, runAs, templatedEnablerepo, templatedDisablerepo, templatedExclude, args...)
+	_, _, changed, err := runYumCommand(closure.HostContext, runAs, templatedEnablerepo, templatedDisablerepo, templatedExclude, false, args...)
 	if err != nil {
 		return YumOutput{Packages: pkgsForRevertAction, State: fmt.Sprintf("revert_failed_%s", revertAction), WasChanged: false}, fmt.Errorf("revert command '%s' failed for packages %v: %w", revertAction, pkgsForRevertAction, err)
 	}
@@ -744,13 +769,16 @@ func (i *YumInput) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind == yaml.MappingNode {
 		// Use a temporary type to avoid recursion
 		type YumInputMap struct {
-			Name        interface{} `yaml:"name"` // Accept string or list
-			Pkg         interface{} `yaml:"pkg"`  // Alias, accept string or list
+			Name        interface{} `yaml:"name"`
+			Pkg         interface{} `yaml:"pkg"`
 			State       string      `yaml:"state"`
-			UpdateCache *bool       `yaml:"update_cache"` // Use pointer for explicit false
+			UpdateCache *bool       `yaml:"update_cache"`
 			Enablerepo  interface{} `yaml:"enablerepo"`
 			Disablerepo interface{} `yaml:"disablerepo"`
 			Exclude     interface{} `yaml:"exclude"`
+			UpdateOnly  *bool       `yaml:"update_only"`
+			Autoremove  *bool       `yaml:"autoremove"`
+			Security    *bool       `yaml:"security"`
 		}
 		var tmp YumInputMap
 		if err := node.Decode(&tmp); err != nil {
@@ -781,6 +809,15 @@ func (i *YumInput) UnmarshalYAML(node *yaml.Node) error {
 		}
 		if tmp.Exclude != nil {
 			i.Exclude = tmp.Exclude
+		}
+		if tmp.UpdateOnly != nil {
+			i.UpdateOnly = *tmp.UpdateOnly
+		}
+		if tmp.Autoremove != nil {
+			i.Autoremove = *tmp.Autoremove
+		}
+		if tmp.Security != nil {
+			i.Security = *tmp.Security
 		}
 
 		// Parse and validate both packages and repositories
