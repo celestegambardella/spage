@@ -25,7 +25,13 @@ Spage works by:
 
 ## Usage
 
-You can use Spage in two ways:
+You can install Spage using `go install`:
+
+```bash
+go install github.com/AlexanderGrooff/spage@latest
+```
+
+Alternatively, you can use Spage in two ways:
 
 1. Generate the Go code that you can then compile and run (using the `spage generate` command)
 2. Run directly across an inventory (using the `spage run` command)
@@ -120,6 +126,34 @@ The Python fallback automatically activates when:
 
 - Requires Python 3 and pip on the executing host for collection installation
 - Some complex Ansible plugins may have additional dependencies
+
+## Development
+
+To build and run `spage` locally for development, follow these steps:
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/AlexanderGrooff/spage.git
+    cd spage
+    ```
+
+2.  **Build the binary:**
+    ```bash
+    go build .
+    ```
+    This will create a `spage` executable in the project root.
+
+3.  **Run the local binary:**
+    ```bash
+    ./spage --help
+    ```
+
+### Testing
+
+Prerequisites:
+- Must have a local running temporal server
+- Install [Temporal CLI](https://docs.temporal.io/cli#install) for the quickest way to get a server running locally
+- `temporal server start-dev` to start server
 
 ## Differences between Spage and Ansible
 
